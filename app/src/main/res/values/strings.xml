@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Finder</string>
+    <string name="findButtonText">Find</string>
+    <string name="searchTextHint">Enter text</string>
+    <string name="appName">FINDER</string>
 </resources>
