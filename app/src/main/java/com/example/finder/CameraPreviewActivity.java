@@ -2,11 +2,16 @@ package com.example.finder;
 
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Point;
 import android.graphics.Rect;
-import android.media.Image;
+import android.media.Ringtone;
+import android.media.RingtoneManager;
+import android.net.Uri;
 import android.os.Bundle;
+import android.preference.PreferenceManager;
+import android.util.Log;
 import android.util.Size;
 import android.view.View;
 import android.widget.Toast;
@@ -23,6 +28,7 @@ import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.android.gms.tasks.OnCompleteListener;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.android.gms.tasks.Task;
@@ -40,20 +46,35 @@ import java.util.concurrent.Executors;
 
 public class CameraPreviewActivity extends AppCompatActivity {
 
-    private static final String[] REQUIRED_PERMISSIONS = new String[] {"android.permission.CAMERA"};
+    private static final String[] REQUIRED_PERMISSIONS = new String[] {"android.permission.CAMERA", "android.permission.WRITE_EXTERNAL_STORAGE"};
     private static final int REQUEST_CODE_PERMISSIONS = 10;
+    private static final String TAG = "DEBUG LOG";
     private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
     private final Executor executor = Executors.newSingleThreadExecutor();
     private String message;
+    private final TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+    private PreviewView cameraPreviewView;
+    private ProcessCameraProvider cameraProvider;
+    private Preview previewUsecase;
+    private CameraSelector cameraSelector;
+    private ImageAnalysis imageAnalysisUsecase;
+    private long lastNotificationRingtime = System.currentTimeMillis();
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Objects.requireNonNull(getSupportActionBar()).hide();
         setContentView(R.layout.activity_camera_preview);
+        getLifecycle().addObserver(recognizer);
         // Get the Intent that started this activity and extract the string
         Intent intent = getIntent();
+        cameraPreviewView = findViewById(R.id.cameraPreviewView);
+        cameraSelector = new CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                .build();
         message = intent.getStringExtra(MainActivity.EXTRA_MESSAGE);
+        Log.d(TAG, "onCreate: " + message);
         if (allPermissionGranted()) {
             startCamera();
         } else {
@@ -85,75 +106,125 @@ public class CameraPreviewActivity extends AppCompatActivity {
 
     private void startCamera() {
         cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                bindPreview(cameraProvider);
-            } catch (ExecutionException | InterruptedException e) {
-                // No errors need to be handled for this Future.
-                // This should never be reached.
+        cameraProviderFuture.addListener(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    cameraProvider = cameraProviderFuture.get();
+                    bindPreview();
+                } catch (ExecutionException | InterruptedException e) {
+                    // No errors need to be handled for this Future.
+                    // This should never be reached.
+                }
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
-    private void bindPreview(ProcessCameraProvider cameraProvider) {
-        Preview preview = new Preview.Builder()
-                .build();
+    private void bindPreview() {
+        if (cameraProvider == null) {
+            Log.d(TAG, "bindPreview: cameraProvider == null");
+        }
+        if (previewUsecase != null) {
+            cameraProvider.unbind(previewUsecase);
+        }
+        setupPreviewUsecase();
 
-        CameraSelector cameraSelector = new CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-                .build();
+        setupImageAnalysisUsecase();
 
-        PreviewView cameraPreviewView = findViewById(R.id.cameraPreviewView);
-        preview.setSurfaceProvider(cameraPreviewView.getSurfaceProvider());
-        ImageAnalysis imageAnalysis =
+        cameraProvider.bindToLifecycle(this, cameraSelector, previewUsecase, imageAnalysisUsecase);
+    }
+
+    private void setupImageAnalysisUsecase() {
+        if (imageAnalysisUsecase != null) {
+            cameraProvider.unbind(imageAnalysisUsecase);
+        }
+        imageAnalysisUsecase =
                 new ImageAnalysis.Builder()
-                        .setTargetResolution(new Size(1280, 720))
+                        .setTargetResolution(Objects.requireNonNull(getCameraXTargetResolution(this)))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
-        imageAnalysis.setAnalyzer(executor, new TextAnalyzer());
-        Camera camera = cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis, preview);
+        imageAnalysisUsecase.setAnalyzer(executor, new TextAnalyzer());
+    }
+
+    private void setupPreviewUsecase() {
+        Preview.Builder builder = new Preview.Builder();
+        Size targetResolution = getCameraXTargetResolution(this);
+        if (targetResolution != null) {
+            builder.setTargetResolution(targetResolution);
+        }
+        previewUsecase = builder.build();
+        previewUsecase.setSurfaceProvider(cameraPreviewView.getSurfaceProvider());
+    }
+
+    private Size getCameraXTargetResolution(CameraPreviewActivity context) {
+        String prefKey = "crctas";
+        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context);
+        try {
+            return android.util.Size.parseSize(sharedPreferences.getString(prefKey, null));
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     public void goBack(View view) {
         this.finish();
     }
+
+    public void showToast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
     private class TextAnalyzer implements ImageAnalysis.Analyzer {
 
         @Override
         public void analyze(@NonNull ImageProxy imageProxy) {
-            try (@SuppressLint("UnsafeOptInUsageError") Image mediaImage = imageProxy.getImage()) {
-                if (mediaImage != null) {
-                    InputImage image =
-                            InputImage.fromMediaImage(mediaImage, imageProxy.getImageInfo().getRotationDegrees());
-                    recognizeText(image);
+            @SuppressLint("UnsafeOptInUsageError") InputImage image =
+                    InputImage.fromMediaImage(Objects.requireNonNull(imageProxy.getImage()),
+                            imageProxy.getImageInfo().getRotationDegrees());
 
-                }
-            }
-        }
-
-        private void recognizeText(InputImage image) {
-            TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-            Task<Text> result =
-                    recognizer.process(image)
-                            .addOnSuccessListener(new OnSuccessListener<Text>() {
+            recognizer.process(image)
+                    .addOnSuccessListener(new OnSuccessListener<Text>() {
+                        @Override
+                        public void onSuccess(Text visionText) {
+                            Log.d(TAG, "onSuccess: Text detected");
+                            processTextBlock(visionText);
+                        }
+                    })
+                    .addOnFailureListener(
+                            new OnFailureListener() {
                                 @Override
-                                public void onSuccess(Text visionText) {
-                                    processTextBlock(visionText);
+                                public void onFailure(@NonNull Exception e) {
+                                    // Task failed with an exception
+                                    Log.d(TAG, "onFailure: Failed to detect text");
                                 }
                             })
-                            .addOnFailureListener(
-                                    new OnFailureListener() {
-                                        @Override
-                                        public void onFailure(@NonNull Exception e) {
-                                            // Task failed with an exception
-                                            // ...
-                                        }
-                                    });
+                    .addOnCompleteListener(new OnCompleteListener<Text>() {
+                        @Override
+                        public void onComplete(@NonNull Task<Text> task) {
+                            imageProxy.close();
+                        }
+                    });
         }
 
         private void processTextBlock(Text visionText) {
-            String resultText = visionText.getText();
+            String resultText = visionText.getText().toLowerCase();
+            if (resultText.contains(message.toLowerCase())) {
+                Log.d(TAG, "processTextBlock: " + System.currentTimeMillis());
+                long currentTime = System.currentTimeMillis();
+                // 3 second cooldown time
+                if (currentTime - lastNotificationRingtime > (1000*3)) {
+                    try {
+                        Uri notification = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+                        Ringtone r = RingtoneManager.getRingtone(getApplicationContext(), notification);
+                        r.play();
+                        lastNotificationRingtime = currentTime;
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            } else {
+                //showToast(resultText);
+            }
 
             for (Text.TextBlock block : visionText.getTextBlocks()) {
                 String blockText = block.getText();
@@ -172,5 +243,4 @@ public class CameraPreviewActivity extends AppCompatActivity {
             }
         }
     }
-
 }
