@@ -11,6 +11,7 @@ import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.Size;
 import android.view.View;
@@ -48,7 +49,7 @@ public class CameraPreviewActivity extends AppCompatActivity {
 
     private static final String[] REQUIRED_PERMISSIONS = new String[] {"android.permission.CAMERA", "android.permission.WRITE_EXTERNAL_STORAGE"};
     private static final int REQUEST_CODE_PERMISSIONS = 10;
-    private static final String TAG = "DEBUG LOG";
+    private static final String TAG = "DEBUG_LOG";
     private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
     private final Executor executor = Executors.newSingleThreadExecutor();
     private String message;
@@ -59,6 +60,8 @@ public class CameraPreviewActivity extends AppCompatActivity {
     private CameraSelector cameraSelector;
     private ImageAnalysis imageAnalysisUsecase;
     private long lastNotificationRingtime = System.currentTimeMillis();
+    private GraphicOverlay graphicOverlay;
+    DisplayMetrics metrics;
 
 
     @Override
@@ -74,6 +77,8 @@ public class CameraPreviewActivity extends AppCompatActivity {
                 .requireLensFacing(CameraSelector.LENS_FACING_BACK)
                 .build();
         message = intent.getStringExtra(MainActivity.EXTRA_MESSAGE);
+        graphicOverlay = findViewById(R.id.graphicOverlay);
+        metrics = getResources().getDisplayMetrics();
         Log.d(TAG, "onCreate: " + message);
         if (allPermissionGranted()) {
             startCamera();
@@ -138,9 +143,10 @@ public class CameraPreviewActivity extends AppCompatActivity {
         if (imageAnalysisUsecase != null) {
             cameraProvider.unbind(imageAnalysisUsecase);
         }
+        Size targetResolution = new Size(metrics.widthPixels, metrics.heightPixels);
         imageAnalysisUsecase =
                 new ImageAnalysis.Builder()
-                        .setTargetResolution(Objects.requireNonNull(getCameraXTargetResolution(this)))
+                        .setTargetResolution(targetResolution)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
         imageAnalysisUsecase.setAnalyzer(executor, new TextAnalyzer());
@@ -148,22 +154,10 @@ public class CameraPreviewActivity extends AppCompatActivity {
 
     private void setupPreviewUsecase() {
         Preview.Builder builder = new Preview.Builder();
-        Size targetResolution = getCameraXTargetResolution(this);
-        if (targetResolution != null) {
-            builder.setTargetResolution(targetResolution);
-        }
+        Size targetResolution = new Size(metrics.widthPixels, metrics.heightPixels);
+        builder.setTargetResolution(targetResolution);
         previewUsecase = builder.build();
         previewUsecase.setSurfaceProvider(cameraPreviewView.getSurfaceProvider());
-    }
-
-    private Size getCameraXTargetResolution(CameraPreviewActivity context) {
-        String prefKey = "crctas";
-        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context);
-        try {
-            return android.util.Size.parseSize(sharedPreferences.getString(prefKey, null));
-        } catch (RuntimeException e) {
-            return null;
-        }
     }
 
     public void goBack(View view) {
@@ -186,7 +180,7 @@ public class CameraPreviewActivity extends AppCompatActivity {
                     .addOnSuccessListener(new OnSuccessListener<Text>() {
                         @Override
                         public void onSuccess(Text visionText) {
-                            Log.d(TAG, "onSuccess: Text detected");
+                            graphicOverlay.clear();
                             processTextBlock(visionText);
                         }
                     })
@@ -195,7 +189,7 @@ public class CameraPreviewActivity extends AppCompatActivity {
                                 @Override
                                 public void onFailure(@NonNull Exception e) {
                                     // Task failed with an exception
-                                    Log.d(TAG, "onFailure: Failed to detect text");
+                                    Log.d(TAG, "onFailure: Failed to detect text", e);
                                 }
                             })
                     .addOnCompleteListener(new OnCompleteListener<Text>() {
@@ -208,6 +202,7 @@ public class CameraPreviewActivity extends AppCompatActivity {
 
         private void processTextBlock(Text visionText) {
             String resultText = visionText.getText().toLowerCase();
+            Log.d(TAG, "processTextBlock: " + resultText);
             if (resultText.contains(message.toLowerCase())) {
                 Log.d(TAG, "processTextBlock: " + System.currentTimeMillis());
                 long currentTime = System.currentTimeMillis();
@@ -222,24 +217,9 @@ public class CameraPreviewActivity extends AppCompatActivity {
                         e.printStackTrace();
                     }
                 }
+                graphicOverlay.add(new TextGraphic(graphicOverlay, visionText, message));
             } else {
                 //showToast(resultText);
-            }
-
-            for (Text.TextBlock block : visionText.getTextBlocks()) {
-                String blockText = block.getText();
-                Point[] blockCornerPoints = block.getCornerPoints();
-                Rect blockFrame = block.getBoundingBox();
-                for (Text.Line line : block.getLines()) {
-                    String lineText = line.getText();
-                    Point[] lineCornerPoints = line.getCornerPoints();
-                    Rect lineFrame = line.getBoundingBox();
-                    for (Text.Element element : line.getElements()) {
-                        String elementText = element.getText();
-                        Point[] elementCornerPoints = element.getCornerPoints();
-                        Rect elementFrame = element.getBoundingBox();
-                    }
-                }
             }
         }
     }
